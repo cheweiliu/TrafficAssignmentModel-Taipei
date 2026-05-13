@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Taipei Traffic Assignment v2.0</title>
+    <!-- 引入核心工具：PyScript, Leaflet (地圖), Tailwind (樣式) -->
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
+    <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+
+    <div class="container mx-auto p-4">
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">台北都會區交通指派模型</h1>
+            <p class="text-gray-600">基於 Frank-Wolfe 演算法的平衡賦流分析</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+            <!-- 控制面板 -->
+            <div class="bg-white p-4 rounded-xl shadow-md lg:col-span-1">
+                <h2 class="font-semibold mb-4 border-b pb-2">參數設定</h2>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm">疊代次數 (Max Iterations)</label>
+                        <input id="iter-input" type="number" value="20" class="w-full border rounded p-1">
+                    </div>
+                    <button id="run-btn" py-click="main" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition">
+                        開始計算
+                    </button>
+                    <div id="status" class="mt-4 text-sm text-blue-500 font-mono"></div>
+                </div>
+            </div>
+
+            <!-- 地圖顯示區 -->
+            <div class="bg-white p-2 rounded-xl shadow-md lg:col-span-3">
+                <div id="map" style="height: 600px;" class="rounded-lg"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Python 邏輯區 -->
+    <section class="pyscript">
+        <script type="py">
+            import pandas as pd
+            import numpy as np
+            import json
+            from pyodide.http import open_url
+            from js import update_map_js, console
+
+            # 預設資料路徑 (請替換成你 GitHub 的 Raw 連結)
+            BASE_URL = "https://raw.githubusercontent.com/aKi-1201/TrafficAssignmentModel-Taipei/main/data/"
+            
+            async def main(event):
+                status = Element("status")
+                status.write("⏳ 讀取路網資料...")
+                
+                try:
+                    # 1. 讀取資料
+                    links = pd.read_csv(open_url(BASE_URL + "links.csv"))
+                    od = pd.read_csv(open_url(BASE_URL + "od.csv"))
+                    # 假設你有 nodes.csv 來提供座標
+                    # nodes = pd.read_csv(open_url(BASE_URL + "nodes.csv"))
+
+                    status.write("🚀 執行 Frank-Wolfe 演算法...")
+                    
+                    # --- 這裡插入 aKi-1201 專案的核心邏輯 ---
+                    # 簡化示範：我們模擬計算後的流量 (Volume) 與 V/C 比
+                    # 實際開發時請在此處 import 你的 Assignment Class
+                    links['assigned_volume'] = np.random.randint(100, 3000, size=len(links))
+                    links['vc_ratio'] = links['assigned_volume'] / (links['capacity'] + 1)
+                    # ---------------------------------------
+
+                    # 2. 準備傳給 JS 的 GeoJSON 格式 (包含座標)
+                    # 注意：實際需結合 nodes 表的 lat/lon
+                    result_data = links.to_json(orient='records')
+                    
+                    status.write("✅ 計算完成，更新地圖中")
+                    update_map_js(result_data)
+                    
+                except Exception as e:
+                    status.write(f"❌ 錯誤: {str(e)}")
+
+        </script>
+    </section>
+
+    <script>
+        // 初始化 Leaflet 地圖
+        const map = L.map('map').setView([25.04, 121.53], 12);
+        L.tileLayer('https://{s}.tile.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+
+        let layerGroup = L.layerGroup().addTo(map);
+
+        function update_map_js(jsonStr) {
+            layerGroup.clearLayers();
+            const data = JSON.parse(jsonStr);
+            
+            data.forEach(link => {
+                // 這裡假設你的 links 已經補上了座標 info
+                // 如果沒有，需在 Python 端 merge 座標
+                if(link.o_lat && link.d_lat) {
+                    const color = link.vc_ratio > 0.9 ? '#ef4444' : (link.vc_ratio > 0.7 ? '#f59e0b' : '#10b981');
+                    
+                    const polyline = L.polyline([[link.o_lat, link.o_lon], [link.d_lat, link.d_lon]], {
+                        color: color,
+                        weight: Math.max(2, link.vc_ratio * 8),
+                        opacity: 0.8
+                    }).addTo(layerGroup);
+                    
+                    polyline.bindPopup(`路段: ${link.init_node} -> ${link.term_node}<br>流量: ${link.assigned_volume.toFixed(0)}<br>V/C: ${link.vc_ratio.toFixed(2)}`);
+                }
+            });
+        }
+    </script>
+</body>
+</html>
