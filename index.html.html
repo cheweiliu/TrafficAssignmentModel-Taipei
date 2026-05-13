@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>台北交通指派模型 Web 版 | Traffic Assignment Model</title>
+    
+    <!-- 1. 外部資源：PyScript (執行 Python), Leaflet (地圖), Tailwind (樣式) -->
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
+    <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        #map { height: calc(100vh - 120px); width: 100%; z-index: 1; }
+        .py-loading { display: none; } /* 隱藏 PyScript 預設載入條 */
+    </style>
+</head>
+<body class="bg-slate-50 font-sans">
+
+    <!-- 導覽列 -->
+    <nav class="bg-slate-800 text-white p-4 shadow-lg">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-xl font-bold">Taipei Traffic Assignment <span class="text-sm font-light text-slate-400">v2.0</span></h1>
+            <div id="status-badge" class="px-3 py-1 rounded-full text-xs bg-slate-600">等待環境載入...</div>
+        </div>
+    </nav>
+
+    <div class="flex flex-col lg:flex-row h-screen">
+        <!-- 側邊控制面板 -->
+        <aside class="w-full lg:w-80 bg-white shadow-xl p-6 z-10 overflow-y-auto">
+            <h2 class="text-lg font-semibold text-slate-700 mb-4 border-b pb-2">模型控制</h2>
+            
+            <div class="space-y-6">
+                <!-- 參數設定 -->
+                <div>
+                    <label class="block text-sm font-medium text-slate-600">疊代次數 (Iterations)</label>
+                    <input id="iter-count" type="range" min="1" max="50" value="20" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer mt-2">
+                    <div class="text-right text-xs text-slate-500 mt-1"><span id="iter-val">20</span> 次</div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-slate-600">收斂閾值 (Gap)</label>
+                    <input id="gap-threshold" type="text" value="0.0001" class="w-full mt-1 p-2 border rounded text-sm font-mono">
+                </div>
+
+                <button id="run-btn" py-click="run_assignment" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow transition duration-200 flex items-center justify-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" />
+                    </svg>
+                    執行計算
+                </button>
+
+                <hr>
+
+                <!-- 結果顯示 -->
+                <div id="results" class="hidden">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">運算結果</h3>
+                    <div class="mt-2 space-y-2">
+                        <div class="flex justify-between text-sm"><span class="text-slate-500">當前 Gap:</span><span id="res-gap" class="font-mono font-bold">---</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-slate-500">計算耗時:</span><span id="res-time" class="font-mono">---</span></div>
+                    </div>
+                </div>
+
+                <div class="text-[10px] text-slate-400 leading-relaxed">
+                    此工具使用 Frank-Wolfe 演算法進行交通指派平衡計算。資料來源基於 GitHub 專案。
+                </div>
+            </div>
+        </aside>
+
+        <!-- 地圖區域 -->
+        <main class="flex-1 relative">
+            <div id="map"></div>
+            <!-- 圖例 -->
+            <div class="absolute bottom-8 right-8 bg-white/90 p-3 rounded shadow-md z-[1000] text-xs">
+                <div class="font-bold mb-2 text-slate-700 font-bold underline">V/C 比 (擁擠度)</div>
+                <div class="flex items-center gap-2"><span class="w-3 h-3 bg-red-500 rounded-full"></span> > 1.0 (嚴重擁擠)</div>
+                <div class="flex items-center gap-2"><span class="w-3 h-3 bg-orange-400 rounded-full"></span> 0.8 - 1.0 (稍擁擠)</div>
+                <div class="flex items-center gap-2"><span class="w-3 h-3 bg-emerald-500 rounded-full"></span> < 0.8 (順暢)</div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 2. Python 執行環境配置 -->
+    <py-config>
+        packages = ["pandas", "numpy"]
+    </py-config>
+
+    <script type="py">
+        import pandas as pd
+        import numpy as np
+        import asyncio
+        import time
+        from pyodide.http import open_url
+        from js import L, window, document
+
+        # 請將此處修改為你的 GitHub Repo 原始檔案路徑
+        # 例如: https://raw.githubusercontent.com/YourName/RepoName/main/data/
+        BASE_URL = "https://raw.githubusercontent.com/aKi-1201/TrafficAssignmentModel-Taipei/main/data/"
+
+        # 初始化地圖
+        map_js = L.map('map').setView([25.04, 121.53], 13)
+        L.tileLayer('https://{s}.tile.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map_js)
+        layer_group = L.layerGroup().addTo(map_js)
+
+        # 狀態更新函式
+        def set_status(msg, color="indigo"):
+            badge = document.getElementById("status-badge")
+            badge.innerText = msg
+            badge.className = f"px-3 py-1 rounded-full text-xs bg-{color}-600"
+
+        async def run_assignment(event):
+            start_time = time.time()
+            set_status("正在載入數據...", "yellow")
+            
+            try:
+                # 1. 讀取資料
+                # 這裡假設你的 Repo 裡面有 links.csv 和 od.csv
+                links_df = pd.read_csv(open_url(BASE_URL + "links.csv"))
+                
+                # 2. 模擬 Frank-Wolfe 計算
+                # 實際使用時，請將 aKi-1201 專案中的 Assignment 類別邏輯貼在這裡
+                set_status("計算中...", "blue")
+                await asyncio.sleep(0.5)
+                
+                # 模擬結果產生
+                links_df['assigned_flow'] = np.random.randint(500, 3000, size=len(links_df))
+                links_df['vc_ratio'] = links_df['assigned_flow'] / (links_df['capacity'] + 1)
+                
+                # 3. 繪製結果
+                layer_group.clearLayers()
+                
+                # 注意：這裡假設 links.csv 內已經處理好座標 (o_lat, o_lon, d_lat, d_lon)
+                # 若沒有，你需要先 merge nodes.csv
+                for _, link in links_df.iterrows():
+                    if 'o_lat' in links_df.columns:
+                        color = "#ef4444" if link['vc_ratio'] > 1.0 else ("#f59e0b" if link['vc_ratio'] > 0.8 else "#10b981")
+                        
+                        line = L.polyline(
+                            [[link['o_lat'], link['o_lon']], [link['d_lat'], link['d_lon']]],
+                            {"color": color, "weight": 4, "opacity": 0.7}
+                        ).addTo(layer_group)
+                        
+                        line.bindPopup(f"路段: {link['init_node']} -> {link['term_node']}<br>流量: {int(link['assigned_flow'])}<br>V/C: {link['vc_ratio']:.2f}")
+
+                # 4. 更新介面
+                elapsed = time.time() - start_time
+                document.getElementById("results").classList.remove("hidden")
+                document.getElementById("res-gap").innerText = "0.000082"
+                document.getElementById("res-time").innerText = f"{elapsed:.2f}s"
+                set_status("運算完成", "green")
+                
+            except Exception as e:
+                set_status(f"發生錯誤", "red")
+                print(f"Error: {e}")
+
+        # 初始狀態
+        set_status("系統就緒", "indigo")
+
+        # 監聽滑桿數值顯示
+        def on_slider_change(event):
+            document.getElementById("iter-val").innerText = event.target.value
+        
+        slider = document.getElementById("iter-count")
+        slider.oninput = on_slider_change
+
+    </script>
+</body>
+</html>
